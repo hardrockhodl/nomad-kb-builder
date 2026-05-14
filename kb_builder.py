@@ -112,9 +112,19 @@ def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None, skip_filt
     h3_before = sum(1 for s in result.all_sections if s.section_level == 3)
     h3_after = h3_before
     h3_rejected = 0
+    merge_count = 0
 
     if not skip_filter:
-        from pipeline.h3_filter import filter_h3_sections, save_filter_report
+        from pipeline.h3_filter import (
+            merge_duplicate_h3s,
+            filter_h3_sections,
+            save_filter_report,
+        )
+
+        console.print(f"[bold]Merging duplicate H3 sections...[/bold]")
+        merge_count = merge_duplicate_h3s(result)
+        if merge_count > 0:
+            console.print(f"  [dim]Merged {merge_count} duplicate H3 section(s)[/dim]")
 
         console.print(f"[bold]Filtering H3 noise...[/bold]")
         filter_result = filter_h3_sections(result)
@@ -150,7 +160,8 @@ def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None, skip_filt
     )
 
     if not skip_filter:
-        table.add_row("Total H3 candidates (before filter)", str(h3_before))
+        table.add_row("Duplicate H3 sections merged", str(merge_count))
+        table.add_row("Total H3 candidates (post-merge, before filter)", str(h3_before))
         table.add_row("H3 sections (after filter)", str(h3_after))
         table.add_row("H3 candidates rejected", str(h3_rejected))
     else:

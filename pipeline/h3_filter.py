@@ -64,6 +64,22 @@ TABLE_HEADERS = {
 
 
 # ============================================================================
+# Sentence-starter patterns (hard reject)
+# ============================================================================
+# H3 candidates whose title begins with one of these words are almost certainly
+# extracted sentences, not real headers. Real Cisco headers start with nouns
+# or technical terms.
+
+SENTENCE_STARTERS = {
+    "this", "if", "to", "when", "wait", "copies", "saves", "auto-copy",
+    "for", "you", "the", "there", "a", "an", "use", "begins", "enters",
+    "issues", "initiates", "performs", "configures", "returns", "specifies",
+    "forces", "enables", "disables", "includes", "refers", "allows",
+    "provides", "supports", "requires", "permits", "displays", "verifies",
+}
+
+
+# ============================================================================
 # Soft accept patterns (keyword-based)
 # ============================================================================
 
@@ -131,6 +147,26 @@ def evaluate_h3(section: DetectedSection) -> tuple[bool, str]:
     if len(title) < 4:
         return False, "Title too short (<4 chars)"
 
+    # Sentence-starter pattern
+    title_words = title.split()
+    first_word = title_words[0].lower() if title_words else ""
+    if "-" in first_word:
+        first_word_root = first_word.split("-")[0]
+        if first_word_root in SENTENCE_STARTERS:
+            return False, (
+                f"Title starts with sentence-starter '{first_word}' "
+                "(looks like prose, not header)"
+            )
+    if first_word in SENTENCE_STARTERS:
+        return False, (
+            f"Title starts with sentence-starter '{first_word}' "
+            "(looks like prose, not header)"
+        )
+
+    # Empty content
+    if section.word_count == 0:
+        return False, "Zero word content (empty section)"
+
     if CISCO_PRODUCT_RE.match(title):
         return False, "Cisco product/serial number pattern"
 
@@ -161,6 +197,56 @@ def evaluate_h3(section: DetectedSection) -> tuple[bool, str]:
         return True, f"Keyword pattern (only {word_count} words content)"
 
     return False, f"Insufficient content ({word_count} words) and no keyword pattern"
+
+
+# ============================================================================
+# Duplicate H3 merging
+# ============================================================================
+
+def merge_duplicate_h3s(result: SectionDetectionResult) -> int:
+    """
+    Merge H3 sections that have the same title within the same parent H2.
+
+    Cisco PDFs sometimes produce duplicate H3 detections because section text
+    spans multiple pages and the same header appears as a continuation marker.
+    These are not separate sections — they are the same section split by PDF
+    page breaks.
+
+    Within each chapter, group H3s by (parent_section, section_title). If
+    multiple exist, keep the first and append other content to it.
+
+    Returns the number of duplicate sections merged.
+    """
+    merge_count = 0
+
+    for chapter in result.chapters:
+        seen: dict[tuple[str, str], DetectedSection] = {}
+        new_sections: list[DetectedSection] = []
+
+        for s in chapter.sections:
+            if s.section_level == 2:
+                new_sections.append(s)
+                continue
+
+            key = (s.parent_section or "", s.section_title)
+
+            if key not in seen:
+                seen[key] = s
+                new_sections.append(s)
+                continue
+
+            # Duplicate — merge into first occurrence.
+            first = seen[key]
+            if s.content.strip():
+                first.content = first.content.rstrip() + "\n\n" + s.content.lstrip()
+            first.page_end = max(first.page_end, s.page_end)
+            first.notes.extend(s.notes)
+            first.word_count = len(first.content.split())
+            merge_count += 1
+
+        chapter.sections = new_sections
+
+    return merge_count
 
 
 def filter_h3_sections(result: SectionDetectionResult) -> H3FilterResult:

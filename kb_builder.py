@@ -81,7 +81,9 @@ def extract(pdf_path: Path, output_dir: Path | None):
 @click.argument('extraction_dir', type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option('--output-dir', '-o', type=click.Path(path_type=Path), default=None,
               help='Output directory (default: same as extraction_dir)')
-def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None):
+@click.option('--skip-filter', is_flag=True, default=False,
+              help='Skip H3 noise filtering (keeps all candidates)')
+def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None, skip_filter: bool):
     """Step 2: Detect sections in extracted PDF content."""
 
     # Find the PDF that was extracted (look in input/ matching the dir name)
@@ -107,8 +109,31 @@ def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None):
     if output_dir is None:
         output_dir = extraction_dir
 
+    h3_before = sum(1 for s in result.all_sections if s.section_level == 3)
+    h3_after = h3_before
+    h3_rejected = 0
+
+    if not skip_filter:
+        from pipeline.h3_filter import filter_h3_sections, save_filter_report
+
+        console.print(f"[bold]Filtering H3 noise...[/bold]")
+        filter_result = filter_h3_sections(result)
+
+        report_path = output_dir / "rejected-h3s.txt"
+        save_filter_report(filter_result, report_path)
+
+        h3_before = filter_result.total_h3_input
+        h3_after = filter_result.accepted_count
+        h3_rejected = filter_result.rejected_count
+
     json_path = output_dir / "sections.json"
     md_dir = output_dir / "sections"
+
+    # Clean previous markdown output so stale section files don't linger when
+    # indices/filenames shift between runs (especially after H3 filtering).
+    if md_dir.exists():
+        import shutil
+        shutil.rmtree(md_dir)
 
     save_sections_json(result, json_path)
     save_sections_markdown(result, md_dir)
@@ -120,13 +145,17 @@ def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None):
     table.add_row("Document", result.document_title)
     table.add_row("Chapters detected", str(len(result.chapters)))
     table.add_row(
-        "Total sections (H2)",
+        "Total H2 sections",
         str(sum(1 for s in result.all_sections if s.section_level == 2)),
     )
-    table.add_row(
-        "Total subsections (H3)",
-        str(sum(1 for s in result.all_sections if s.section_level == 3)),
-    )
+
+    if not skip_filter:
+        table.add_row("Total H3 candidates (before filter)", str(h3_before))
+        table.add_row("H3 sections (after filter)", str(h3_after))
+        table.add_row("H3 candidates rejected", str(h3_rejected))
+    else:
+        table.add_row("Total H3 sections (unfiltered)", str(h3_before))
+
     table.add_row(
         "Total notes extracted",
         str(sum(len(s.notes) for s in result.all_sections)),
@@ -143,6 +172,8 @@ def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None):
     console.print(f"\n[green]✓[/green] Saved to {output_dir}/")
     console.print(f"  - sections.json    (machine-readable master)")
     console.print(f"  - sections/        (markdown per section for review)")
+    if not skip_filter:
+        console.print(f"  - rejected-h3s.txt (H3 filter decisions)")
 
 
 if __name__ == '__main__':

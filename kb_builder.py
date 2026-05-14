@@ -187,5 +187,79 @@ def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None, skip_filt
         console.print(f"  - rejected-h3s.txt (H3 filter decisions)")
 
 
+@cli.command('generate-kbs')
+@click.argument('extraction_dir', type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option('--model', '-m', default='qwen3.6:35b-a3b-nvfp4',
+              help='Ollama model to use')
+@click.option('--limit', '-n', type=int, default=None,
+              help='Process only first N units (for testing)')
+def generate_kbs_cmd(extraction_dir: Path, model: str, limit: int | None):
+    """Step 3: Generate KB drafts from detected sections via LLM."""
+
+    sections_path = extraction_dir / "sections.json"
+    if not sections_path.exists():
+        console.print(f"[red]No sections.json in {extraction_dir}. Run detect-sections first.[/red]")
+        sys.exit(1)
+
+    from pipeline.ollama_client import check_ollama_available
+    available, error = check_ollama_available(model)
+    if not available:
+        console.print(f"[red]Ollama check failed: {error}[/red]")
+        sys.exit(1)
+
+    from pipeline.section_detector import load_sections_from_json
+    sections_result = load_sections_from_json(sections_path)
+
+    prompts_dir = Path("prompts")
+    if not prompts_dir.exists():
+        console.print(f"[red]prompts/ directory not found[/red]")
+        sys.exit(1)
+
+    required_prompts = [
+        "system_generator_config.md",
+        "system_generator_theory.md",
+        "system_generator_troubleshooting.md",
+        "user_template.md",
+    ]
+    missing = [p for p in required_prompts if not (prompts_dir / p).exists()]
+    if missing:
+        console.print(f"[red]Missing prompt files: {missing}[/red]")
+        sys.exit(1)
+
+    from pipeline.kb_generator import generate_kbs
+
+    results = generate_kbs(
+        sections_result=sections_result,
+        output_dir=extraction_dir,
+        prompts_dir=prompts_dir,
+        model=model,
+        limit=limit,
+    )
+
+    table = Table(title="KB Generation Summary", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value")
+
+    generated = sum(1 for r in results if r.decision == "generate")
+    skipped = sum(1 for r in results if r.decision == "skip")
+    errored = sum(1 for r in results if r.decision == "error")
+    total_duration = sum(r.duration_seconds for r in results)
+
+    table.add_row("Total units processed", str(len(results)))
+    table.add_row("Generated", str(generated))
+    table.add_row("Skipped", str(skipped))
+    table.add_row("Errored", str(errored))
+    table.add_row("Total time", f"{total_duration:.1f}s ({total_duration / 60:.1f}m)")
+    if results:
+        table.add_row("Avg per unit", f"{total_duration / len(results):.1f}s")
+
+    console.print(table)
+    console.print(f"\n[green]✓[/green] Output saved to {extraction_dir}/kb-drafts/")
+    console.print(f"  - unverified/  KB drafts ready for verification (Step 4)")
+    console.print(f"  - skipped/     Sections marked skip by LLM")
+    if errored:
+        console.print(f"  - errors/      Failed generations")
+
+
 if __name__ == '__main__':
     cli()

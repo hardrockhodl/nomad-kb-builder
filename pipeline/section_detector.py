@@ -644,6 +644,46 @@ def save_sections_json(result: SectionDetectionResult, output_path: Path) -> Non
         json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
 
 
+def load_sections_from_json(json_path: Path) -> SectionDetectionResult:
+    """Reconstruct SectionDetectionResult from saved JSON."""
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+
+    chapters: list[DetectedChapter] = []
+    for ch_data in data["chapters"]:
+        sections: list[DetectedSection] = []
+        for s_data in ch_data["sections"]:
+            sections.append(DetectedSection(
+                chapter_number=s_data["chapter_number"],
+                chapter_title=s_data["chapter_title"],
+                section_title=s_data["section_title"],
+                section_level=s_data["section_level"],
+                parent_section=s_data.get("parent_section"),
+                page_start=s_data["page_start"],
+                page_end=s_data["page_end"],
+                content=s_data["content"],
+                notes=list(s_data.get("notes", [])),
+                word_count=s_data["word_count"],
+                h3_count=s_data.get("h3_count", 0),
+                chapter_summary=s_data.get("chapter_summary", ""),
+            ))
+        chapters.append(DetectedChapter(
+            number=ch_data["number"],
+            title=ch_data["title"],
+            summary=ch_data["summary"],
+            expected_sections=list(ch_data["expected_sections"]),
+            sections=sections,
+            page_start=ch_data["page_start"],
+            page_end=ch_data["page_end"],
+        ))
+
+    return SectionDetectionResult(
+        document_title=data["document_title"],
+        source_pdf=Path(data["source_pdf"]),
+        chapters=chapters,
+        warnings=list(data.get("warnings", [])),
+    )
+
+
 def save_sections_markdown(result: SectionDetectionResult, output_dir: Path) -> None:
     """
     Write each section as a Markdown file under output_dir/chapter-N-<slug>/.

@@ -77,5 +77,73 @@ def extract(pdf_path: Path, output_dir: Path | None):
     console.print(f"  - boilerplate.txt   (filtered pages for debugging)")
 
 
+@cli.command('detect-sections')
+@click.argument('extraction_dir', type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option('--output-dir', '-o', type=click.Path(path_type=Path), default=None,
+              help='Output directory (default: same as extraction_dir)')
+def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None):
+    """Step 2: Detect sections in extracted PDF content."""
+
+    # Find the PDF that was extracted (look in input/ matching the dir name)
+    pdf_basename = extraction_dir.name
+    pdf_candidates = list(Path("input").glob(f"{pdf_basename}.pdf"))
+    if not pdf_candidates:
+        console.print(f"[red]No PDF found matching {pdf_basename} in input/[/red]")
+        sys.exit(1)
+
+    from pipeline.pdf_extractor import extract_pdf
+    from pipeline.section_detector import (
+        detect_sections,
+        save_sections_json,
+        save_sections_markdown,
+    )
+
+    console.print(f"[bold]Re-extracting PDF for section detection...[/bold]")
+    extraction = extract_pdf(pdf_candidates[0])
+
+    console.print(f"[bold]Detecting sections...[/bold]")
+    result = detect_sections(extraction)
+
+    if output_dir is None:
+        output_dir = extraction_dir
+
+    json_path = output_dir / "sections.json"
+    md_dir = output_dir / "sections"
+
+    save_sections_json(result, json_path)
+    save_sections_markdown(result, md_dir)
+
+    table = Table(title="Section Detection Summary", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Document", result.document_title)
+    table.add_row("Chapters detected", str(len(result.chapters)))
+    table.add_row(
+        "Total sections (H2)",
+        str(sum(1 for s in result.all_sections if s.section_level == 2)),
+    )
+    table.add_row(
+        "Total subsections (H3)",
+        str(sum(1 for s in result.all_sections if s.section_level == 3)),
+    )
+    table.add_row(
+        "Total notes extracted",
+        str(sum(len(s.notes) for s in result.all_sections)),
+    )
+    table.add_row("Warnings", str(len(result.warnings)))
+
+    console.print(table)
+
+    if result.warnings:
+        console.print("\n[yellow bold]Warnings:[/yellow bold]")
+        for w in result.warnings:
+            console.print(f"  [yellow]⚠[/yellow]  {w}")
+
+    console.print(f"\n[green]✓[/green] Saved to {output_dir}/")
+    console.print(f"  - sections.json    (machine-readable master)")
+    console.print(f"  - sections/        (markdown per section for review)")
+
+
 if __name__ == '__main__':
     cli()

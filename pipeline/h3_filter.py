@@ -31,6 +31,18 @@ CISCO_PRODUCT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Cisco log/CLI output lines that get extracted as standalone "headers" because
+# PDF flow makes them look like short, capitalized lines.
+CISCO_LOG_RE = re.compile(
+    r"^(Module\s+\d+\s+(powered\s+down|powered\s+up|detected)|"
+    r"Manual\s+power-on\s+of\s+Module|"
+    r'Service\s+".*?"\s+\(PID\s+\d+\)|'
+    r"\d{4}\s+\w{3}\s+\d+\s+\d+:\d+:\d+\s+switch|"
+    r"switch\(config\)#|"
+    r"switch#)",
+    re.IGNORECASE,
+)
+
 # Pure status values (when used as standalone "H3")
 STATUS_VALUES = {
     "active", "standby", "offline", "initializing", "unknown", "failed",
@@ -169,6 +181,9 @@ def evaluate_h3(section: DetectedSection) -> tuple[bool, str]:
 
     if CISCO_PRODUCT_RE.match(title):
         return False, "Cisco product/serial number pattern"
+
+    if CISCO_LOG_RE.match(title):
+        return False, "Cisco syslog/CLI output line"
 
     if title_lower in STATUS_VALUES:
         return False, "Pure status value"

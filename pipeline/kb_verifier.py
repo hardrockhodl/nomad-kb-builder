@@ -98,32 +98,71 @@ def parse_kb_frontmatter(kb_path: Path) -> tuple[dict, str]:
 # Source text lookup
 # ============================================================================
 
-def _slug(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+def _normalize_title(title: str) -> str:
+    """Normalize title for comparison: lowercase, drop punctuation, collapse spaces."""
+    if not title:
+        return ""
+    normalized = title.lower()
+    # Drop chapter prefix like "Chapter 5: " or "5. "
+    normalized = re.sub(r"^chapter\s+\d+:?\s+", "", normalized)
+    normalized = re.sub(r"^\d+\.\s+", "", normalized)
+    # Remove punctuation
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
+    # Collapse whitespace
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _extract_title_from_id(kb_id: str) -> str:
+    """
+    Extract a likely section title from a KB id field.
+
+    Examples:
+        "nx-os-troubleshooting-service-restarts" → "troubleshooting service restarts"
+        "nx-os-hsrp-theory"                      → "hsrp"
+        "nx-os-network-level-high-availability"  → "network level high availability"
+        "ios-xe-configuring-vlan"                → "configuring vlan"
+    """
+    if not kb_id:
+        return ""
+    s = kb_id
+
+    platform_prefixes = ("nx-os-", "nxos-", "ios-xe-", "iosxe-")
+    for prefix in platform_prefixes:
+        if s.lower().startswith(prefix):
+            s = s[len(prefix):]
+            break
+
+    type_suffixes = ("-theory", "-config", "-troubleshooting")
+    for suffix in type_suffixes:
+        if s.lower().endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+
+    return s.replace("-", " ").strip()
 
 
 def find_source_section(
     frontmatter: dict,
     sections_result: SectionDetectionResult,
-    kb_filename: Optional[str] = None,
 ) -> Optional[DetectedSection]:
     """
-    Find the source section the KB was generated from.
+    Find the source section that this KB was generated from.
 
-    Strategy:
-      1. Locate the chapter via source.chapter ("Chapter N: ...").
-      2. Among that chapter's sections, score each by:
-         - title slug appearing in KB filename or frontmatter id (strong signal)
-         - page-range overlap with KB's source.pages
-         - smaller section page range (more specific) as tie-break
-         - H3 over H2 as final tie-break (more specific)
+    Match strategy (in order of preference):
+      1. Exact title match against section_title in the correct chapter,
+         using a candidate title extracted from frontmatter `id`.
+      2. Substring title match (either direction) with the same candidate.
+      3. Page-overlap fallback: section in chapter with most overlap, preferring
+         H2 over H3 when overlaps are equal.
     """
     source = frontmatter.get("source", {})
     chapter_str = str(source.get("chapter", ""))
     pages = source.get("pages", [])
+    kb_id = str(frontmatter.get("id", ""))
 
-    # Try to find chapter number in the string ("Chapter 4: ...").
-    chapter: Optional = None
+    # Find chapter — try number first ("Chapter 5: ..."), fall back to title.
+    chapter = None
     match = re.search(r"(\d+)", chapter_str)
     if match:
         chapter_num = int(match.group(1))
@@ -132,72 +171,64 @@ def find_source_section(
             None,
         )
 
-    # Fallback: match by chapter title slug. LLM may emit just the title
-    # without a "Chapter N:" prefix, e.g. `chapter: "Network-Level High Availability"`.
     if chapter is None and chapter_str:
-        needle = _slug(chapter_str)
-        if needle:
-            chapter = next(
-                (ch for ch in sections_result.chapters
-                 if _slug(ch.title) == needle or needle in _slug(ch.title)
-                 or _slug(ch.title) in needle),
-                None,
-            )
+        chapter_title_norm = _normalize_title(chapter_str)
+        for ch in sections_result.chapters:
+            ch_norm = _normalize_title(ch.title)
+            if ch_norm and (ch_norm == chapter_title_norm
+                            or ch_norm in chapter_title_norm
+                            or chapter_title_norm in ch_norm):
+                chapter = ch
+                break
 
-    if chapter is None:
+    if chapter is None or not chapter.sections:
         return None
 
-    if not chapter.sections:
-        return None
+    # STRATEGY 1+2: Title match via id-derived candidate.
+    if kb_id:
+        candidate = _extract_title_from_id(kb_id)
+        if candidate:
+            candidate_norm = _normalize_title(candidate)
 
-    # Build searchable strings from KB metadata.
-    needle_parts: list[str] = []
-    if kb_filename:
-        needle_parts.append(_slug(Path(kb_filename).stem))
-    frontmatter_id = frontmatter.get("id", "")
-    if frontmatter_id:
-        needle_parts.append(_slug(str(frontmatter_id)))
-    needles = [n for n in needle_parts if n]
+            # Exact normalized match
+            for section in chapter.sections:
+                if _normalize_title(section.section_title) == candidate_norm:
+                    return section
 
-    kb_page_start = pages[0] if pages else None
-    kb_page_end = pages[-1] if pages and len(pages) > 1 else (
-        pages[0] if pages else None
-    )
+            # Substring match — require both strings to be substantial (>=5 chars)
+            # so short tokens like "ha" don't trigger spurious matches.
+            if len(candidate_norm) >= 5:
+                for section in chapter.sections:
+                    sect_norm = _normalize_title(section.section_title)
+                    if len(sect_norm) < 5:
+                        continue
+                    if candidate_norm in sect_norm or sect_norm in candidate_norm:
+                        return section
 
-    def score(section: DetectedSection) -> tuple[int, int, int, int]:
-        """
-        Higher tuples sort first.
+    # STRATEGY 3: Page-overlap fallback.
+    if not pages:
+        return chapter.sections[0]
 
-        - title_match: 1 if section title slug appears in KB filename/id
-        - overlap: pages of overlap with KB's page range
-        - tightness: -size_of_section_pages (prefer smaller/more specific)
-        - level: section_level (H3=3 > H2=2)
-        """
-        section_slug = _slug(section.section_title)
-        title_match = 0
-        if section_slug:
-            for needle in needles:
-                if section_slug in needle or needle in section_slug:
-                    title_match = 1
-                    break
+    kb_page_start = pages[0]
+    kb_page_end = pages[-1] if len(pages) > 1 else pages[0]
 
-        if kb_page_start is not None and kb_page_end is not None:
-            overlap_start = max(kb_page_start, section.page_start)
-            overlap_end = min(kb_page_end, section.page_end)
-            overlap = max(0, overlap_end - overlap_start + 1)
-        else:
-            overlap = 0
+    best_match: Optional[DetectedSection] = None
+    best_overlap = -1
 
-        tightness = -(section.page_end - section.page_start + 1)
-        return (title_match, overlap, tightness, section.section_level)
+    for section in chapter.sections:
+        overlap_start = max(kb_page_start, section.page_start)
+        overlap_end = min(kb_page_end, section.page_end)
+        overlap = max(0, overlap_end - overlap_start + 1)
 
-    best = max(chapter.sections, key=score)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_match = section
+        elif overlap == best_overlap and best_match is not None:
+            # Tie-break: prefer H2 over H3 (the more general section).
+            if section.section_level == 2 and best_match.section_level == 3:
+                best_match = section
 
-    # If the best match has zero overlap AND no title match, treat as no match.
-    title_match, overlap, _, _ = score(best)
-    if title_match == 0 and overlap == 0:
-        return None
-    return best
+    return best_match
 
 
 def build_source_text(
@@ -272,9 +303,7 @@ def verify_kb(
             error_message=f"Frontmatter parse error: {e}",
         )
 
-    source_section = find_source_section(
-        frontmatter, sections_result, kb_filename=kb_path.name
-    )
+    source_section = find_source_section(frontmatter, sections_result)
     if source_section is None:
         source_info = frontmatter.get("source", {})
         return VerificationResult(

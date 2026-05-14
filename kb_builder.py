@@ -261,5 +261,80 @@ def generate_kbs_cmd(extraction_dir: Path, model: str, limit: int | None):
         console.print(f"  - errors/      Failed generations")
 
 
+@cli.command('verify-kbs')
+@click.argument('extraction_dir', type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option('--model', '-m', default='qwen3.6:35b-a3b-nvfp4',
+              help='Ollama model for verification')
+@click.option('--limit', '-n', type=int, default=None,
+              help='Verify only first N files (for testing)')
+def verify_kbs_cmd(extraction_dir: Path, model: str, limit: int | None):
+    """Step 4: Verify KB drafts against source text."""
+
+    sections_path = extraction_dir / "sections.json"
+    if not sections_path.exists():
+        console.print(f"[red]No sections.json in {extraction_dir}.[/red]")
+        sys.exit(1)
+
+    unverified_dir = extraction_dir / "kb-drafts" / "unverified"
+    if not unverified_dir.exists():
+        console.print(f"[red]No kb-drafts/unverified/ directory. Run generate-kbs first.[/red]")
+        sys.exit(1)
+
+    from pipeline.ollama_client import check_ollama_available
+    available, error = check_ollama_available(model)
+    if not available:
+        console.print(f"[red]Ollama check failed: {error}[/red]")
+        sys.exit(1)
+
+    prompts_dir = Path("prompts")
+    if not (prompts_dir / "system_verifier.md").exists():
+        console.print(f"[red]Missing prompts/system_verifier.md[/red]")
+        sys.exit(1)
+
+    from pipeline.kb_verifier import verify_kbs, organize_verified_files
+
+    results = verify_kbs(
+        output_dir=extraction_dir,
+        sections_path=sections_path,
+        prompts_dir=prompts_dir,
+        model=model,
+        limit=limit,
+    )
+
+    console.print("[bold]Organizing verified files...[/bold]")
+    counts = organize_verified_files(results, extraction_dir)
+
+    table = Table(title="Verification Summary", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Total verified", str(len(results)))
+    table.add_row("PASS (auto-approved)", str(counts["pass"]))
+    table.add_row("FLAG (needs-review)", str(counts["flag"]))
+    table.add_row("ERROR", str(counts["error"]))
+
+    all_problems = [p for r in results for p in r.problems]
+    critical = sum(1 for p in all_problems if p.severity == "critical")
+    major = sum(1 for p in all_problems if p.severity == "major")
+    minor = sum(1 for p in all_problems if p.severity == "minor")
+
+    table.add_row("Critical problems", str(critical))
+    table.add_row("Major problems", str(major))
+    table.add_row("Minor problems", str(minor))
+
+    total_duration = sum(r.duration_seconds for r in results)
+    table.add_row("Total time", f"{total_duration:.1f}s ({total_duration / 60:.1f}m)")
+
+    if results:
+        table.add_row("Avg per file", f"{total_duration / len(results):.1f}s")
+
+    console.print(table)
+    console.print(f"\n[green]✓[/green] Output organized in {extraction_dir}/kb-drafts/")
+    console.print(f"  - auto-approved/    Ready to copy to Nomad KB")
+    console.print(f"  - needs-review/     Manual review needed (with .verification.md reports)")
+    if counts["error"]:
+        console.print(f"  - verification-errors/  Failed verification calls")
+
+
 if __name__ == '__main__':
     cli()

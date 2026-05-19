@@ -9,6 +9,7 @@ Usage:
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -236,6 +237,7 @@ def generate_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None)
 
     from pipeline.kb_generator import generate_kbs
 
+    wall_start = time.time()
     results = generate_kbs(
         sections_result=sections_result,
         output_dir=extraction_dir,
@@ -243,6 +245,7 @@ def generate_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None)
         model=model,
         limit=limit,
     )
+    wall_elapsed = time.time() - wall_start
 
     table = Table(title="KB Generation Summary", show_header=False)
     table.add_column("Metric", style="cyan")
@@ -257,9 +260,13 @@ def generate_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None)
     table.add_row("Generated", str(generated))
     table.add_row("Skipped", str(skipped))
     table.add_row("Errored", str(errored))
-    table.add_row("Total time", f"{total_duration:.1f}s ({total_duration / 60:.1f}m)")
+    table.add_row("Wall-clock time", f"{wall_elapsed:.1f}s ({wall_elapsed / 60:.1f}m)")
+    table.add_row("Sum of LLM latencies", f"{total_duration:.1f}s")
     if results:
-        table.add_row("Avg per unit", f"{total_duration / len(results):.1f}s")
+        table.add_row("Avg LLM latency per unit", f"{total_duration / len(results):.1f}s")
+        if wall_elapsed > 0:
+            effective_parallelism = total_duration / wall_elapsed
+            table.add_row("Effective parallelism", f"{effective_parallelism:.1f}x")
 
     console.print(table)
     console.print(f"\n[green]✓[/green] Output saved to {extraction_dir}/kb-drafts/")
@@ -311,6 +318,7 @@ def verify_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None):
 
     from pipeline.kb_verifier import verify_kbs, organize_verified_files
 
+    wall_start = time.time()
     results = verify_kbs(
         output_dir=extraction_dir,
         sections_path=sections_path,
@@ -318,6 +326,7 @@ def verify_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None):
         model=model,
         limit=limit,
     )
+    wall_elapsed = time.time() - wall_start
 
     console.print("[bold]Organizing verified files...[/bold]")
     counts = organize_verified_files(results, extraction_dir)
@@ -341,10 +350,14 @@ def verify_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None):
     table.add_row("Minor problems", str(minor))
 
     total_duration = sum(r.duration_seconds for r in results)
-    table.add_row("Total time", f"{total_duration:.1f}s ({total_duration / 60:.1f}m)")
+    table.add_row("Wall-clock time", f"{wall_elapsed:.1f}s ({wall_elapsed / 60:.1f}m)")
+    table.add_row("Sum of LLM latencies", f"{total_duration:.1f}s")
 
     if results:
-        table.add_row("Avg per file", f"{total_duration / len(results):.1f}s")
+        table.add_row("Avg LLM latency per file", f"{total_duration / len(results):.1f}s")
+        if wall_elapsed > 0:
+            effective_parallelism = total_duration / wall_elapsed
+            table.add_row("Effective parallelism", f"{effective_parallelism:.1f}x")
 
     console.print(table)
     console.print(f"\n[green]✓[/green] Output organized in {extraction_dir}/kb-drafts/")

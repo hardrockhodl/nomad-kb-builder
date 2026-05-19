@@ -366,6 +366,31 @@ def _prepare_verification(
     )
 
 
+def _coerce_problem(p: object) -> dict:
+    """Coerce an LLM-returned ``problems[]`` entry into a dict.
+
+    The verifier prompt specifies dict entries with ``category``/``claim``/
+    ``issue``/``severity`` keys, but the LLM occasionally returns raw strings
+    (or other types) instead. Coerce to a dict so the rest of the pipeline
+    keeps working and the malformed shape itself is surfaced as the issue.
+    """
+    if isinstance(p, dict):
+        return p
+    if isinstance(p, str):
+        return {
+            "category": "malformed_llm_output",
+            "claim": "",
+            "issue": p,
+            "severity": "minor",
+        }
+    return {
+        "category": "malformed_llm_output",
+        "claim": "",
+        "issue": f"Unexpected problem entry type: {type(p).__name__}",
+        "severity": "minor",
+    }
+
+
 def _finalize_verification(
     prep: _VerificationPrep,
     response: OllamaResponse,
@@ -402,7 +427,7 @@ def _finalize_verification(
             issue=p.get("issue", ""),
             severity=p.get("severity", "minor"),
         )
-        for p in parsed_data.get("problems", [])
+        for p in (_coerce_problem(x) for x in parsed_data.get("problems", []))
     ]
 
     return VerificationResult(

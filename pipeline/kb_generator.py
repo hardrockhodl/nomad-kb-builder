@@ -317,6 +317,54 @@ def _resolve_kb_type(parsed: dict, fallback: str) -> str:
     return fallback
 
 
+def _apply_platform_override(content: str, override: str) -> str:
+    """Force the ``platform:`` frontmatter field to ``override``.
+
+    Operates only on the first YAML frontmatter block (between the leading
+    ``---`` and the next ``---``). Preserves all body content, including any
+    ``---`` separators that appear later (e.g. inside cli blocks). Idempotent.
+
+    If the frontmatter has no ``platform:`` line, one is inserted immediately
+    after the opening ``---``.
+    """
+    if not content.startswith("---"):
+        return content
+
+    parts = content.split("\n---\n", maxsplit=1)
+    if len(parts) < 2:
+        return content
+
+    frontmatter, rest = parts[0], parts[1]
+
+    new_frontmatter, n = re.subn(
+        r"^platform:[ \t]*.*$",
+        f"platform: {override}",
+        frontmatter,
+        count=1,
+        flags=re.MULTILINE,
+    )
+
+    if n == 0:
+        lines = new_frontmatter.split("\n")
+        lines.insert(1, f"platform: {override}")
+        new_frontmatter = "\n".join(lines)
+
+    return new_frontmatter + "\n---\n" + rest
+
+
+def _maybe_override_platform(
+    result: "GenerationResult", platform_override: Optional[str],
+) -> None:
+    """Mutate ``result.kb_content`` in place when an override is active."""
+    if not platform_override:
+        return
+    if result.decision != "generate":
+        return
+    if not result.kb_content:
+        return
+    result.kb_content = _apply_platform_override(result.kb_content, platform_override)
+
+
 def _result_from_response(
     unit: GenerationUnit, response: OllamaResponse,
 ) -> GenerationResult:
@@ -475,6 +523,7 @@ def generate_kbs(
     prompts_dir: Path,
     model: str = DEFAULT_MODEL,
     limit: Optional[int] = None,
+    platform_override: Optional[str] = None,
 ) -> list[GenerationResult]:
     """
     Generate KB files for all sections.
@@ -483,8 +532,10 @@ def generate_kbs(
         sections_result: From section detection
         output_dir: Where to write kb-drafts/
         prompts_dir: Where prompt files live
-        model: Ollama model name
+        model: LLM model name
         limit: If set, only process the first N units (for testing)
+        platform_override: If set, every generated KB has its ``platform:``
+            frontmatter field rewritten to this value before being saved.
     """
     all_units: list[GenerationUnit] = []
     for chapter in sections_result.chapters:
@@ -513,6 +564,7 @@ def generate_kbs(
             prompts_dir=prompts_dir,
             model=model,
             batch_fn=batch_fn,
+            platform_override=platform_override,
         )
 
     return _generate_kbs_sequential(
@@ -521,6 +573,7 @@ def generate_kbs(
         output_dir=output_dir,
         prompts_dir=prompts_dir,
         model=model,
+        platform_override=platform_override,
     )
 
 
@@ -530,6 +583,7 @@ def _generate_kbs_sequential(
     output_dir: Path,
     prompts_dir: Path,
     model: str,
+    platform_override: Optional[str] = None,
 ) -> list[GenerationResult]:
     results: list[GenerationResult] = []
 
@@ -554,6 +608,7 @@ def _generate_kbs_sequential(
                 model=model,
             )
 
+            _maybe_override_platform(result, platform_override)
             save_generation_result(result, output_dir)
             results.append(result)
 
@@ -569,6 +624,7 @@ def _generate_kbs_batch(
     prompts_dir: Path,
     model: str,
     batch_fn,
+    platform_override: Optional[str] = None,
 ) -> list[GenerationResult]:
     """Build all prompts up front, fan out via call_vllm_batch, then save."""
     requests: list[tuple[str, str]] = [
@@ -602,6 +658,7 @@ def _generate_kbs_batch(
 
     results = [_result_from_response(u, r) for u, r in zip(all_units, responses)]
     for result in results:
+        _maybe_override_platform(result, platform_override)
         save_generation_result(result, output_dir)
 
     return results

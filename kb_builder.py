@@ -196,7 +196,16 @@ def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None, skip_filt
                    'or LLM_BACKEND=vllm.')
 @click.option('--limit', '-n', type=int, default=None,
               help='Process only first N units (for testing)')
-def generate_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None):
+@click.option('--platform-override', type=str, default=None,
+              help='Override the platform: field in all generated KBs. '
+                   'Example: --platform-override wlc-9800. When unset, '
+                   'the LLM-chosen platform is kept.')
+def generate_kbs_cmd(
+    extraction_dir: Path,
+    model: str | None,
+    limit: int | None,
+    platform_override: str | None,
+):
     """Step 3: Generate KB drafts from detected sections via LLM.
 
     Set LLM_BACKEND=vllm (and optionally VLLM_HOST) to use the parallel vLLM
@@ -237,6 +246,11 @@ def generate_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None)
 
     from pipeline.kb_generator import generate_kbs
 
+    if platform_override:
+        console.print(
+            f"[yellow]Platform override active:[/yellow] {platform_override}"
+        )
+
     wall_start = time.time()
     results = generate_kbs(
         sections_result=sections_result,
@@ -244,6 +258,7 @@ def generate_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None)
         prompts_dir=prompts_dir,
         model=model,
         limit=limit,
+        platform_override=platform_override,
     )
     wall_elapsed = time.time() - wall_start
 

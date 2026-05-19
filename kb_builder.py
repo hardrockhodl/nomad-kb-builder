@@ -189,22 +189,32 @@ def detect_sections_cmd(extraction_dir: Path, output_dir: Path | None, skip_filt
 
 @cli.command('generate-kbs')
 @click.argument('extraction_dir', type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.option('--model', '-m', default='qwen3.6:35b-a3b-nvfp4',
-              help='Ollama model to use')
+@click.option('--model', '-m', default=None,
+              help='LLM model name. Defaults to the backend\'s DEFAULT_MODEL. '
+                   'Backend is selected via env var LLM_BACKEND=ollama (default) '
+                   'or LLM_BACKEND=vllm.')
 @click.option('--limit', '-n', type=int, default=None,
               help='Process only first N units (for testing)')
-def generate_kbs_cmd(extraction_dir: Path, model: str, limit: int | None):
-    """Step 3: Generate KB drafts from detected sections via LLM."""
+def generate_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None):
+    """Step 3: Generate KB drafts from detected sections via LLM.
+
+    Set LLM_BACKEND=vllm (and optionally VLLM_HOST) to use the parallel vLLM
+    backend instead of the default sequential Ollama path.
+    """
 
     sections_path = extraction_dir / "sections.json"
     if not sections_path.exists():
         console.print(f"[red]No sections.json in {extraction_dir}. Run detect-sections first.[/red]")
         sys.exit(1)
 
-    from pipeline.ollama_client import check_ollama_available
-    available, error = check_ollama_available(model)
+    from pipeline import get_llm_client
+    llm = get_llm_client()
+    if model is None:
+        model = llm.DEFAULT_MODEL
+
+    available, error = llm.check_ollama_available(model)
     if not available:
-        console.print(f"[red]Ollama check failed: {error}[/red]")
+        console.print(f"[red]LLM backend check failed: {error}[/red]")
         sys.exit(1)
 
     from pipeline.section_detector import load_sections_from_json
@@ -263,12 +273,18 @@ def generate_kbs_cmd(extraction_dir: Path, model: str, limit: int | None):
 
 @cli.command('verify-kbs')
 @click.argument('extraction_dir', type=click.Path(exists=True, file_okay=False, path_type=Path))
-@click.option('--model', '-m', default='qwen3.6:35b-a3b-nvfp4',
-              help='Ollama model for verification')
+@click.option('--model', '-m', default=None,
+              help='LLM model name for verification. Defaults to the backend\'s '
+                   'DEFAULT_MODEL. Backend is selected via env var '
+                   'LLM_BACKEND=ollama (default) or LLM_BACKEND=vllm.')
 @click.option('--limit', '-n', type=int, default=None,
               help='Verify only first N files (for testing)')
-def verify_kbs_cmd(extraction_dir: Path, model: str, limit: int | None):
-    """Step 4: Verify KB drafts against source text."""
+def verify_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None):
+    """Step 4: Verify KB drafts against source text.
+
+    Set LLM_BACKEND=vllm (and optionally VLLM_HOST) to use the parallel vLLM
+    backend instead of the default sequential Ollama path.
+    """
 
     sections_path = extraction_dir / "sections.json"
     if not sections_path.exists():
@@ -280,10 +296,14 @@ def verify_kbs_cmd(extraction_dir: Path, model: str, limit: int | None):
         console.print(f"[red]No kb-drafts/unverified/ directory. Run generate-kbs first.[/red]")
         sys.exit(1)
 
-    from pipeline.ollama_client import check_ollama_available
-    available, error = check_ollama_available(model)
+    from pipeline import get_llm_client
+    llm = get_llm_client()
+    if model is None:
+        model = llm.DEFAULT_MODEL
+
+    available, error = llm.check_ollama_available(model)
     if not available:
-        console.print(f"[red]Ollama check failed: {error}[/red]")
+        console.print(f"[red]LLM backend check failed: {error}[/red]")
         sys.exit(1)
 
     prompts_dir = Path("prompts")

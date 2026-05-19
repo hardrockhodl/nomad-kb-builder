@@ -8,6 +8,7 @@ parses the response, and saves output.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass
@@ -24,12 +25,17 @@ from rich.progress import (
     TextColumn,
 )
 
-from pipeline.ollama_client import DEFAULT_MODEL, OllamaResponse, call_ollama
+from pipeline import get_llm_client
 from pipeline.section_detector import (
     DetectedChapter,
     DetectedSection,
     SectionDetectionResult,
 )
+
+_llm = get_llm_client()
+DEFAULT_MODEL = _llm.DEFAULT_MODEL
+OllamaResponse = _llm.OllamaResponse
+call_ollama = _llm.call_ollama
 
 
 console = Console()
@@ -274,24 +280,23 @@ def parse_llm_response(raw_text: str) -> tuple[bool, dict, str]:
 # Generation
 # ============================================================================
 
-def generate_kb_for_unit(
+def _build_unit_prompts(
     unit: GenerationUnit,
     document_title: str,
     prompts_dir: Path,
-    model: str,
-) -> GenerationResult:
-    """Generate KB file (or skip decision) for one unit."""
+) -> tuple[str, str]:
+    """Return ``(system_prompt, user_prompt)`` for one generation unit."""
     system_prompt = load_system_prompt(unit.suggested_type, prompts_dir)
     user_prompt = build_user_prompt(
         unit, document_title, prompts_dir / "user_template.md"
     )
+    return system_prompt, user_prompt
 
-    response: OllamaResponse = call_ollama(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        model=model,
-    )
 
+def _result_from_response(
+    unit: GenerationUnit, response: OllamaResponse,
+) -> GenerationResult:
+    """Turn an LLM response into a GenerationResult, handling parse failures."""
     if not response.success:
         return GenerationResult(
             unit=unit,
@@ -330,6 +335,26 @@ def generate_kb_for_unit(
         retry_count=response.retry_count,
         raw_response=response.raw_text,
     )
+
+
+def generate_kb_for_unit(
+    unit: GenerationUnit,
+    document_title: str,
+    prompts_dir: Path,
+    model: str,
+) -> GenerationResult:
+    """Generate KB file (or skip decision) for one unit."""
+    system_prompt, user_prompt = _build_unit_prompts(
+        unit, document_title, prompts_dir,
+    )
+
+    response: OllamaResponse = call_ollama(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        model=model,
+    )
+
+    return _result_from_response(unit, response)
 
 
 # ============================================================================
@@ -447,8 +472,38 @@ def generate_kbs(
 
     console.print(f"[bold]Generating KBs for {len(all_units)} units...[/bold]")
     console.print(f"[dim]Model: {model}[/dim]")
+
+    batch_fn = getattr(_llm, "call_vllm_batch", None)
+    if batch_fn is not None:
+        console.print("[dim]Backend: vLLM (parallel batch mode)[/dim]")
     console.print()
 
+    if batch_fn is not None:
+        return _generate_kbs_batch(
+            all_units=all_units,
+            sections_result=sections_result,
+            output_dir=output_dir,
+            prompts_dir=prompts_dir,
+            model=model,
+            batch_fn=batch_fn,
+        )
+
+    return _generate_kbs_sequential(
+        all_units=all_units,
+        sections_result=sections_result,
+        output_dir=output_dir,
+        prompts_dir=prompts_dir,
+        model=model,
+    )
+
+
+def _generate_kbs_sequential(
+    all_units: list[GenerationUnit],
+    sections_result: SectionDetectionResult,
+    output_dir: Path,
+    prompts_dir: Path,
+    model: str,
+) -> list[GenerationResult]:
     results: list[GenerationResult] = []
 
     with Progress(
@@ -476,5 +531,50 @@ def generate_kbs(
             results.append(result)
 
             progress.advance(task)
+
+    return results
+
+
+def _generate_kbs_batch(
+    all_units: list[GenerationUnit],
+    sections_result: SectionDetectionResult,
+    output_dir: Path,
+    prompts_dir: Path,
+    model: str,
+    batch_fn,
+) -> list[GenerationResult]:
+    """Build all prompts up front, fan out via call_vllm_batch, then save."""
+    requests: list[tuple[str, str]] = [
+        _build_unit_prompts(u, sections_result.document_title, prompts_dir)
+        for u in all_units
+    ]
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("•"),
+        TextColumn("[cyan]{task.fields[current]}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Generating", total=len(all_units), current="")
+
+        def on_done(idx: int, _resp: OllamaResponse) -> None:
+            progress.update(
+                task,
+                advance=1,
+                current=all_units[idx].section.section_title[:50],
+            )
+
+        responses = asyncio.run(batch_fn(
+            requests,
+            model=model,
+            progress_callback=on_done,
+        ))
+
+    results = [_result_from_response(u, r) for u, r in zip(all_units, responses)]
+    for result in results:
+        save_generation_result(result, output_dir)
 
     return results

@@ -8,6 +8,7 @@ organizes the file into auto-approved/ or needs-review/.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shutil
@@ -25,12 +26,17 @@ from rich.progress import (
     TextColumn,
 )
 
-from pipeline.ollama_client import DEFAULT_MODEL, OllamaResponse, call_ollama
+from pipeline import get_llm_client
 from pipeline.section_detector import (
     DetectedSection,
     SectionDetectionResult,
     load_sections_from_json,
 )
+
+_llm = get_llm_client()
+DEFAULT_MODEL = _llm.DEFAULT_MODEL
+OllamaResponse = _llm.OllamaResponse
+call_ollama = _llm.call_ollama
 
 
 console = Console()
@@ -286,13 +292,26 @@ def build_verifier_prompt(kb_content: str, source_text: str) -> str:
     )
 
 
-def verify_kb(
+@dataclass
+class _VerificationPrep:
+    """Pre-LLM prep state for one KB file. Carries enough to build a result
+    once the LLM response arrives."""
+    kb_path: Path
+    source_section_title: str
+    system_prompt: str
+    user_prompt: str
+
+
+def _prepare_verification(
     kb_path: Path,
     sections_result: SectionDetectionResult,
     prompts_dir: Path,
-    model: str,
-) -> VerificationResult:
-    """Verify a single KB file against its source."""
+) -> tuple[Optional[VerificationResult], Optional[_VerificationPrep]]:
+    """Build the prompts and source-text payload for one KB file.
+
+    Returns ``(early_result, None)`` when frontmatter or source lookup fails
+    (no LLM call needed), or ``(None, prep)`` when ready to call the LLM.
+    """
     try:
         frontmatter, _body = parse_kb_frontmatter(kb_path)
     except ValueError as e:
@@ -301,7 +320,7 @@ def verify_kb(
             kb_path=kb_path,
             decision="ERROR",
             error_message=f"Frontmatter parse error: {e}",
-        )
+        ), None
 
     source_section = find_source_section(frontmatter, sections_result)
     if source_section is None:
@@ -315,7 +334,7 @@ def verify_kb(
                 f"chapter={source_info.get('chapter')}, "
                 f"pages={source_info.get('pages')}"
             ),
-        )
+        ), None
 
     chapter = next(
         (ch for ch in sections_result.chapters
@@ -339,34 +358,41 @@ def verify_kb(
     kb_full_text = kb_path.read_text(encoding="utf-8")
     user_prompt = build_verifier_prompt(kb_full_text, source_text)
 
-    response: OllamaResponse = call_ollama(
+    return None, _VerificationPrep(
+        kb_path=kb_path,
+        source_section_title=source_section.section_title,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
-        model=model,
     )
 
+
+def _finalize_verification(
+    prep: _VerificationPrep,
+    response: OllamaResponse,
+) -> VerificationResult:
+    """Turn an LLM response into a VerificationResult."""
     if not response.success:
         return VerificationResult(
-            kb_filename=kb_path.name,
-            kb_path=kb_path,
+            kb_filename=prep.kb_path.name,
+            kb_path=prep.kb_path,
             decision="ERROR",
             error_message=response.error,
             duration_seconds=response.duration_seconds,
             retry_count=response.retry_count,
-            source_section_title=source_section.section_title,
+            source_section_title=prep.source_section_title,
         )
 
     parsed_data, parse_error = _parse_verifier_response(response.raw_text)
     if parse_error:
         return VerificationResult(
-            kb_filename=kb_path.name,
-            kb_path=kb_path,
+            kb_filename=prep.kb_path.name,
+            kb_path=prep.kb_path,
             decision="ERROR",
             error_message=f"Parse error: {parse_error}",
             duration_seconds=response.duration_seconds,
             retry_count=response.retry_count,
             raw_response=response.raw_text,
-            source_section_title=source_section.section_title,
+            source_section_title=prep.source_section_title,
         )
 
     problems = [
@@ -380,15 +406,36 @@ def verify_kb(
     ]
 
     return VerificationResult(
-        kb_filename=kb_path.name,
-        kb_path=kb_path,
+        kb_filename=prep.kb_path.name,
+        kb_path=prep.kb_path,
         decision=parsed_data.get("decision", "FLAG"),
         problems=problems,
         duration_seconds=response.duration_seconds,
         retry_count=response.retry_count,
         raw_response=response.raw_text,
-        source_section_title=source_section.section_title,
+        source_section_title=prep.source_section_title,
     )
+
+
+def verify_kb(
+    kb_path: Path,
+    sections_result: SectionDetectionResult,
+    prompts_dir: Path,
+    model: str,
+) -> VerificationResult:
+    """Verify a single KB file against its source."""
+    early, prep = _prepare_verification(kb_path, sections_result, prompts_dir)
+    if early is not None:
+        return early
+    assert prep is not None  # for type checkers
+
+    response: OllamaResponse = call_ollama(
+        system_prompt=prep.system_prompt,
+        user_prompt=prep.user_prompt,
+        model=model,
+    )
+
+    return _finalize_verification(prep, response)
 
 
 def _parse_verifier_response(raw_text: str) -> tuple[dict, Optional[str]]:
@@ -534,8 +581,35 @@ def verify_kbs(
 
     console.print(f"[bold]Verifying {len(kb_files)} KB files...[/bold]")
     console.print(f"[dim]Model: {model}[/dim]")
+
+    batch_fn = getattr(_llm, "call_vllm_batch", None)
+    if batch_fn is not None:
+        console.print("[dim]Backend: vLLM (parallel batch mode)[/dim]")
     console.print()
 
+    if batch_fn is not None:
+        return _verify_kbs_batch(
+            kb_files=kb_files,
+            sections_result=sections_result,
+            prompts_dir=prompts_dir,
+            model=model,
+            batch_fn=batch_fn,
+        )
+
+    return _verify_kbs_sequential(
+        kb_files=kb_files,
+        sections_result=sections_result,
+        prompts_dir=prompts_dir,
+        model=model,
+    )
+
+
+def _verify_kbs_sequential(
+    kb_files: list[Path],
+    sections_result: SectionDetectionResult,
+    prompts_dir: Path,
+    model: str,
+) -> list[VerificationResult]:
     results: list[VerificationResult] = []
 
     with Progress(
@@ -561,3 +635,59 @@ def verify_kbs(
             progress.advance(task)
 
     return results
+
+
+def _verify_kbs_batch(
+    kb_files: list[Path],
+    sections_result: SectionDetectionResult,
+    prompts_dir: Path,
+    model: str,
+    batch_fn,
+) -> list[VerificationResult]:
+    """Batch-mode verification: pre-build all prompts, then fan out via vLLM."""
+    # slot per kb_file: either an early VerificationResult or a _VerificationPrep
+    slots: list = []
+    for kb_path in kb_files:
+        early, prep = _prepare_verification(kb_path, sections_result, prompts_dir)
+        slots.append(early if early is not None else prep)
+
+    pending: list[tuple[int, _VerificationPrep]] = [
+        (i, s) for i, s in enumerate(slots) if isinstance(s, _VerificationPrep)
+    ]
+
+    if not pending:
+        # All KB files had prep errors — nothing to send.
+        return [s for s in slots]  # type: ignore[misc]
+
+    requests = [(p.system_prompt, p.user_prompt) for _, p in pending]
+
+    results: list[Optional[VerificationResult]] = [None] * len(kb_files)
+    for i, slot in enumerate(slots):
+        if isinstance(slot, VerificationResult):
+            results[i] = slot
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("•"),
+        TextColumn("[cyan]{task.fields[current]}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Verifying", total=len(pending), current="")
+
+        def on_done(idx: int, _resp: OllamaResponse) -> None:
+            _, prep = pending[idx]
+            progress.update(task, advance=1, current=prep.kb_path.stem[:50])
+
+        responses = asyncio.run(batch_fn(
+            requests,
+            model=model,
+            progress_callback=on_done,
+        ))
+
+    for (orig_idx, prep), response in zip(pending, responses):
+        results[orig_idx] = _finalize_verification(prep, response)
+
+    return [r for r in results if r is not None]

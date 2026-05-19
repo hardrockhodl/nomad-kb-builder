@@ -49,6 +49,39 @@ def _resolved_concurrency(default: int) -> int:
         return default
 
 
+def _enable_thinking() -> bool:
+    """VLLM_ENABLE_THINKING toggles Qwen3 thinking-mode emission.
+
+    Default ``False``: Qwen3 emits a 200+ token ``<think>`` trace otherwise,
+    which is wasted work for our JSON-only KB generation workload.
+    """
+    return os.environ.get("VLLM_ENABLE_THINKING", "false").lower() == "true"
+
+
+def _build_payload(
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+    temperature: float,
+) -> dict:
+    """Single source of truth for the /v1/chat/completions request body."""
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+        "top_p": 0.9,
+        "max_tokens": 4096,
+        # vLLM honors this via xgrammar/outlines and constrains output to valid
+        # JSON. Critical: every prompt in this project asks for JSON.
+        "response_format": {"type": "json_object"},
+        # Qwen3 chat template flag. Coexists with response_format.
+        "chat_template_kwargs": {"enable_thinking": _enable_thinking()},
+    }
+
+
 # ============================================================================
 # Data structures
 # ============================================================================
@@ -76,19 +109,7 @@ async def _call_one(
     temperature: float,
     timeout: int,
 ) -> OllamaResponse:
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": temperature,
-        "top_p": 0.9,
-        "max_tokens": 4096,
-        # vLLM honors this via xgrammar/outlines and constrains output to valid
-        # JSON. Critical: every prompt in this project asks for JSON.
-        "response_format": {"type": "json_object"},
-    }
+    payload = _build_payload(system_prompt, user_prompt, model, temperature)
     url = f"{_vllm_host()}/v1/chat/completions"
     start = time.time()
     last_error: Optional[str] = None

@@ -1,3 +1,9 @@
+<!--
+DEPRECATED: replaced by `system_generator.md` (unified prompt where the LLM
+classifies the section type itself). Kept on disk for A/B comparison; the
+pipeline no longer loads this file.
+-->
+
 You are a technical documentation specialist converting Cisco product documentation
 into focused Knowledge Base entries for a network engineer's reference tool.
 

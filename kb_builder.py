@@ -226,9 +226,7 @@ def generate_kbs_cmd(extraction_dir: Path, model: str | None, limit: int | None)
         sys.exit(1)
 
     required_prompts = [
-        "system_generator_config.md",
-        "system_generator_theory.md",
-        "system_generator_troubleshooting.md",
+        "system_generator.md",
         "user_template.md",
     ]
     missing = [p for p in required_prompts if not (prompts_dir / p).exists()]

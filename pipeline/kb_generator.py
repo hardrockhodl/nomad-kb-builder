@@ -68,6 +68,10 @@ class GenerationResult:
     duration_seconds: float
     retry_count: int
     raw_response: str
+    # config | theory | troubleshooting. With the unified prompt the LLM picks
+    # this and returns it in the JSON response; we fall back to the
+    # ``unit.suggested_type`` heuristic when the LLM omits or garbles it.
+    kb_type: Optional[str] = None
 
 
 # ============================================================================
@@ -224,9 +228,18 @@ def build_user_prompt(
 
 
 def load_system_prompt(kb_type: str, prompts_dir: Path) -> str:
-    """Load the appropriate system prompt for the KB type."""
-    filename = f"system_generator_{kb_type}.md"
-    return (prompts_dir / filename).read_text(encoding="utf-8")
+    """Load the unified generator prompt.
+
+    The ``kb_type`` arg is accepted for backwards compatibility but ignored —
+    the LLM now classifies the section type itself and emits ``kb_type`` in
+    its response. The argument stays in the signature so call sites and the
+    heuristic suggestion path don't need to know about this change.
+    """
+    del kb_type  # intentionally unused
+    path = prompts_dir / "system_generator.md"
+    if not path.exists():
+        raise FileNotFoundError(f"Prompt not found: {path}")
+    return path.read_text(encoding="utf-8")
 
 
 # ============================================================================
@@ -293,6 +306,17 @@ def _build_unit_prompts(
     return system_prompt, user_prompt
 
 
+_VALID_KB_TYPES = ("config", "theory", "troubleshooting")
+
+
+def _resolve_kb_type(parsed: dict, fallback: str) -> str:
+    """LLM-returned ``kb_type`` if valid, else the heuristic ``suggested_type``."""
+    candidate = parsed.get("kb_type")
+    if isinstance(candidate, str) and candidate in _VALID_KB_TYPES:
+        return candidate
+    return fallback
+
+
 def _result_from_response(
     unit: GenerationUnit, response: OllamaResponse,
 ) -> GenerationResult:
@@ -308,6 +332,7 @@ def _result_from_response(
             duration_seconds=response.duration_seconds,
             retry_count=response.retry_count,
             raw_response="",
+            kb_type=unit.suggested_type,
         )
 
     success, parsed, error = parse_llm_response(response.raw_text)
@@ -322,6 +347,7 @@ def _result_from_response(
             duration_seconds=response.duration_seconds,
             retry_count=response.retry_count,
             raw_response=response.raw_text,
+            kb_type=unit.suggested_type,
         )
 
     return GenerationResult(
@@ -334,6 +360,7 @@ def _result_from_response(
         duration_seconds=response.duration_seconds,
         retry_count=response.retry_count,
         raw_response=response.raw_text,
+        kb_type=_resolve_kb_type(parsed, unit.suggested_type),
     )
 
 

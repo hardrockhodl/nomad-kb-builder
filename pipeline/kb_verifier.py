@@ -38,6 +38,12 @@ DEFAULT_MODEL = _llm.DEFAULT_MODEL
 OllamaResponse = _llm.OllamaResponse
 call_ollama = _llm.call_ollama
 
+# Per-request output token budget for the verify stage. The verifier returns
+# a small JSON (decision + small problems[]), so 2048 is plenty. Keeping this
+# well below the generator's 4096 frees ~2000 tokens of input headroom on
+# long sections, fixing HTTP 400s on prompts close to the model's max_model_len.
+VERIFIER_MAX_TOKENS = 2048
+
 
 console = Console()
 
@@ -458,6 +464,7 @@ def verify_kb(
         system_prompt=prep.system_prompt,
         user_prompt=prep.user_prompt,
         model=model,
+        max_tokens=VERIFIER_MAX_TOKENS,
     )
 
     return _finalize_verification(prep, response)
@@ -710,6 +717,7 @@ def _verify_kbs_batch(
             requests,
             model=model,
             progress_callback=on_done,
+            max_tokens=VERIFIER_MAX_TOKENS,
         ))
 
     for (orig_idx, prep), response in zip(pending, responses):

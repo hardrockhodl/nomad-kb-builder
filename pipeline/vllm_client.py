@@ -58,11 +58,15 @@ def _enable_thinking() -> bool:
     return os.environ.get("VLLM_ENABLE_THINKING", "false").lower() == "true"
 
 
+DEFAULT_MAX_TOKENS = 4096
+
+
 def _build_payload(
     system_prompt: str,
     user_prompt: str,
     model: str,
     temperature: float,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> dict:
     """Single source of truth for the /v1/chat/completions request body."""
     return {
@@ -73,7 +77,7 @@ def _build_payload(
         ],
         "temperature": temperature,
         "top_p": 0.9,
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
         # vLLM honors this via xgrammar/outlines and constrains output to valid
         # JSON. Critical: every prompt in this project asks for JSON.
         "response_format": {"type": "json_object"},
@@ -108,8 +112,11 @@ async def _call_one(
     model: str,
     temperature: float,
     timeout: int,
+    max_tokens: int,
 ) -> OllamaResponse:
-    payload = _build_payload(system_prompt, user_prompt, model, temperature)
+    payload = _build_payload(
+        system_prompt, user_prompt, model, temperature, max_tokens,
+    )
     url = f"{_vllm_host()}/v1/chat/completions"
     start = time.time()
     last_error: Optional[str] = None
@@ -171,12 +178,17 @@ async def call_vllm_batch(
     timeout: int = DEFAULT_TIMEOUT,
     concurrency: int = DEFAULT_CONCURRENCY,
     progress_callback: Optional[Callable[[int, OllamaResponse], None]] = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> list[OllamaResponse]:
     """Send many ``(system_prompt, user_prompt)`` pairs in parallel.
 
     Returns a list of ``OllamaResponse`` in the same order as ``requests``.
     Optionally invokes ``progress_callback(index, response)`` as each request
     completes (out of order) so callers can drive a progress bar.
+
+    ``max_tokens`` is the per-request output budget. Stages like verify that
+    produce short JSON responses should pass a smaller value so the input
+    side of the (input + output ≤ model_max_len) window has more headroom.
     """
     if not requests:
         return []
@@ -195,7 +207,7 @@ async def call_vllm_batch(
 
         async def run(idx: int, sys_p: str, usr_p: str) -> None:
             resp = await _call_one(
-                client, sem, sys_p, usr_p, model, temperature, timeout,
+                client, sem, sys_p, usr_p, model, temperature, timeout, max_tokens,
             )
             results[idx] = resp
             if progress_callback is not None:
@@ -219,6 +231,7 @@ def call_ollama(
     model: str = DEFAULT_MODEL,
     temperature: float = 0.1,
     timeout: int = DEFAULT_TIMEOUT,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> OllamaResponse:
     """Single-request convenience wrapper. Runs the async batch with one item."""
     results = asyncio.run(call_vllm_batch(
@@ -227,6 +240,7 @@ def call_ollama(
         temperature=temperature,
         timeout=timeout,
         concurrency=1,
+        max_tokens=max_tokens,
     ))
     return results[0]
 

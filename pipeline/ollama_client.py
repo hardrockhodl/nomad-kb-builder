@@ -21,6 +21,7 @@ import requests
 OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_MODEL = "qwen3.6:35b-a3b-nvfp4"
 DEFAULT_TIMEOUT = 300  # 5 minutes per call (sections can be large)
+DEFAULT_MAX_TOKENS = 4096  # generator default; verify stage overrides to ~2048
 MAX_RETRIES = 3
 RETRY_DELAYS = [2, 5, 15]  # seconds between retries
 
@@ -48,6 +49,7 @@ def call_ollama(
     model: str = DEFAULT_MODEL,
     temperature: float = 0.1,
     timeout: int = DEFAULT_TIMEOUT,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> OllamaResponse:
     """
     Call Ollama with system + user prompt. Returns response or error.
@@ -55,6 +57,10 @@ def call_ollama(
     Uses /api/generate (not /api/chat) for simpler streaming-free interaction.
     Constructs a combined prompt with ChatML-style markers that qwen models
     parse natively.
+
+    ``max_tokens`` is the per-request output budget (mapped to Ollama's
+    ``num_predict`` option). Stages like verify that produce short JSON
+    responses should pass a smaller value.
     """
     combined_prompt = (
         f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
@@ -70,6 +76,7 @@ def call_ollama(
             "temperature": temperature,
             "top_p": 0.9,
             "num_ctx": 8192,
+            "num_predict": max_tokens,
         },
     }
 

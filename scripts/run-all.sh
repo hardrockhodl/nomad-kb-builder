@@ -11,9 +11,10 @@
 # Each stage is timed independently. Final report shows totals.
 #
 # Usage: ./scripts/run-all.sh
-#        SKIP_CLEAN=1 ./scripts/run-all.sh        # don't wipe output/ first
-#        STAGE=A ./scripts/run-all.sh             # run only Stage A
-#        STAGE=BC ./scripts/run-all.sh            # run only Stages B and C
+#        SKIP_CLEAN=1 ./scripts/run-all.sh                   # don't wipe output/ first
+#        STAGE=A ./scripts/run-all.sh                        # run only Stage A
+#        STAGE=BC ./scripts/run-all.sh                       # run only Stages B and C
+#        PLATFORM_OVERRIDE=ios-xr ./scripts/run-all.sh       # force platform on all generated KBs
 
 set -eu
 
@@ -35,6 +36,7 @@ NC='\033[0m'
 
 STAGE="${STAGE:-ABC}"
 SKIP_CLEAN="${SKIP_CLEAN:-0}"
+PLATFORM_OVERRIDE="${PLATFORM_OVERRIDE:-}"
 
 # Ensure venv is active
 if [ -z "${VIRTUAL_ENV:-}" ]; then
@@ -66,6 +68,9 @@ echo -e "${BOLD}Pipeline run starting${NC}"
 echo "  PDFs found: ${#PDFS[@]}"
 echo "  Log dir:    $LOG_DIR"
 echo "  Stages:     $STAGE"
+if [ -n "$PLATFORM_OVERRIDE" ]; then
+    echo -e "  Platform override:    ${YELLOW}$PLATFORM_OVERRIDE${NC}"
+fi
 echo ""
 
 # ----------------------------------------------------------------------------
@@ -183,8 +188,14 @@ run_stage_b() {
         echo -e "${YELLOW}[B $idx/$total]${NC} $basename"
 
         local pdf_start pdf_end pdf_elapsed
+        local -a gen_cmd
+        gen_cmd=(python kb_builder.py generate-kbs "$OUTPUT_DIR/$basename")
+        if [ -n "$PLATFORM_OVERRIDE" ]; then
+            gen_cmd+=(--platform-override "$PLATFORM_OVERRIDE")
+        fi
+
         pdf_start=$(date +%s.%N)
-        if ! python kb_builder.py generate-kbs "$OUTPUT_DIR/$basename" >> "$log" 2>&1; then
+        if ! "${gen_cmd[@]}" >> "$log" 2>&1; then
             echo -e "  ${RED}GENERATE FAILED${NC} - see $log"
             continue
         fi
